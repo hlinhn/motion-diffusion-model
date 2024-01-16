@@ -1,3 +1,6 @@
+import sys
+sys.path.append("/home/halinh/projects/motion-diffusion-model")
+
 import numpy as np
 import os
 import torch
@@ -8,56 +11,58 @@ from visualize.joints2smpl.src.smplify import SMPLify3D
 from tqdm import tqdm
 import utils.rotation_conversions as geometry
 import argparse
+from time import time
 
 
 class joints2smpl:
-
-    def __init__(self, num_frames, device_id, cuda=True):
+    def __init__(self, device_id, cuda=True):
         self.device = torch.device("cuda:" + str(device_id) if cuda else "cpu")
         # self.device = torch.device("cpu")
-        self.batch_size = num_frames
+        # self.batch_size = num_frames
         self.num_joints = 22  # for HumanML3D
         self.joint_category = "AMASS"
-        self.num_smplify_iters = 150
+        self.num_smplify_iters = 30
         self.fix_foot = False
         print(config.SMPL_MODEL_DIR)
-        smplmodel = smplx.create(config.SMPL_MODEL_DIR,
-                                 model_type="smpl", gender="neutral", ext="pkl",
-                                 batch_size=self.batch_size).to(self.device)
 
         # ## --- load the mean pose as original ----
         smpl_mean_file = config.SMPL_MEAN_FILE
 
-        file = h5py.File(smpl_mean_file, 'r')
-        self.init_mean_pose = torch.from_numpy(file['pose'][:]).unsqueeze(0).repeat(self.batch_size, 1).float().to(self.device)
-        self.init_mean_shape = torch.from_numpy(file['shape'][:]).unsqueeze(0).repeat(self.batch_size, 1).float().to(self.device)
+        self.file = h5py.File(smpl_mean_file, 'r')
+
+    def reset_batch_size(self, batch_size):
+        self.batch_size = batch_size
+        self.smplmodel = smplx.create(config.SMPL_MODEL_DIR, 
+                                      model_type="smpl", gender="neutral", ext="pkl",
+                                      batch_size=self.batch_size).to(self.device)
+        self.init_mean_pose = torch.from_numpy(self.file['pose'][:]).unsqueeze(0).repeat(self.batch_size, 1).float().to(self.device)
+        self.init_mean_shape = torch.from_numpy(self.file['shape'][:]).unsqueeze(0).repeat(self.batch_size, 1).float().to(self.device)
         self.cam_trans_zero = torch.Tensor([0.0, 0.0, 0.0]).unsqueeze(0).to(self.device)
-        #
-
-        # # #-------------initialize SMPLify
-        self.smplify = SMPLify3D(smplxmodel=smplmodel,
-                            batch_size=self.batch_size,
-                            joints_category=self.joint_category,
-                            num_iters=self.num_smplify_iters,
-                            device=self.device)
+        self.smplify = SMPLify3D(smplxmodel=self.smplmodel,
+                                 batch_size=self.batch_size,
+                                 joints_category=self.joint_category,
+                                 num_iters=self.num_smplify_iters,
+                                 device=self.device)
 
 
-    def npy2smpl(self, npy_path):
-        out_path = npy_path.replace('.npy', '_rot.npy')
-        motions = np.load(npy_path, allow_pickle=True)[None][0]
+    def npy2smpl(self, npy_path, saved_path):
+        # out_path = npy_path.replace('.npy', '_rot.npy')
+        filename = os.path.basename(npy_path)
+        out_path = os.path.join(saved_path, filename)
+        motions = np.load(npy_path, allow_pickle=True)
         # print_batch('', motions)
-        n_samples = motions['motion'].shape[0]
+        n_samples = 1 # len(motions)
+        self.reset_batch_size(len(motions))
+
         all_thetas = []
         for sample_i in tqdm(range(n_samples)):
-            thetas, _ = self.joint2smpl(motions['motion'][sample_i].transpose(2, 0, 1))  # [nframes, njoints, 3]
+            thetas, _ = self.joint2smpl(motions) # ['motion'][sample_i].transpose(2, 0, 1))  # [nframes, njoints, 3]
             all_thetas.append(thetas.cpu().numpy())
-        motions['motion'] = np.concatenate(all_thetas, axis=0)
-        print('motions', motions['motion'].shape)
+        output = np.concatenate(all_thetas, axis=0)
+        print('motions', output.shape)
 
         print(f'Saving [{out_path}]')
-        np.save(out_path, motions)
-        exit()
-
+        np.save(out_path, output)
 
 
     def joint2smpl(self, input_joints, init_params=None):
@@ -117,15 +122,18 @@ class joints2smpl:
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument("--input_path", type=str, required=True, help='Blender file or dir with blender files')
-    parser.add_argument("--cuda", type=bool, default=True, help='')
+    parser.add_argument("--output_path", type=str)
+    parser.add_argument("--cuda", action="store_false", help='')
     parser.add_argument("--device", type=int, default=0, help='')
     params = parser.parse_args()
 
     simplify = joints2smpl(device_id=params.device, cuda=params.cuda)
 
+    start = time()
     if os.path.isfile(params.input_path) and params.input_path.endswith('.npy'):
-        simplify.npy2smpl(params.input_path)
+        simplify.npy2smpl(params.input_path, params.output_path)
     elif os.path.isdir(params.input_path):
         files = [os.path.join(params.input_path, f) for f in os.listdir(params.input_path) if f.endswith('.npy')]
         for f in files:
             simplify.npy2smpl(f)
+    print(f"Took {time() - start}")
